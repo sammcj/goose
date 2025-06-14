@@ -7,7 +7,7 @@ mod prompt;
 mod thinking;
 
 pub use self::export::message_to_markdown;
-pub use builder::{build_session, SessionBuilderConfig};
+pub use builder::{build_session, SessionBuilderConfig, SessionSettings};
 use console::Color;
 use goose::agents::AgentEvent;
 use goose::permission::permission_confirmation::PrincipalType;
@@ -727,7 +727,6 @@ impl Session {
         loop {
             tokio::select! {
                 result = stream.next() => {
-                    let _ = progress_bars.hide();
                     match result {
                         Some(Ok(AgentEvent::Message(message))) => {
                             // If it's a confirmation request, get approval but otherwise do not render/persist
@@ -865,6 +864,7 @@ impl Session {
                                 session::persist_messages(&self.session_file, &self.messages, None).await?;
 
                                 if interactive {output::hide_thinking()};
+                                let _ = progress_bars.hide();
                                 output::render_message(&message, self.debug);
                                 if interactive {output::show_thinking()};
                             }
@@ -891,8 +891,11 @@ impl Session {
                                                     v.to_string()
                                             },
                                         };
-                                        // output::render_text_no_newlines(&message, None, true);
-                                        progress_bars.log(&message);
+                                        if interactive {
+                                            output::set_thinking_message(&message);
+                                        } else {
+                                            progress_bars.log(&message);
+                                        }
                                     },
                                     "notifications/progress" => {
                                         let progress = o.get("progress").and_then(|v| v.as_f64());
