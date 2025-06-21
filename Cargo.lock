@@ -704,6 +704,7 @@ dependencies = [
  "aws-credential-types",
  "aws-sigv4",
  "aws-smithy-async",
+ "aws-smithy-eventstream",
  "aws-smithy-http 0.60.12",
  "aws-smithy-runtime",
  "aws-smithy-runtime-api",
@@ -761,6 +762,29 @@ dependencies = [
  "aws-types",
  "bytes",
  "fastrand 2.3.0",
+ "http 0.2.12",
+ "once_cell",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
+name = "aws-sdk-sagemakerruntime"
+version = "1.63.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c3188bb9f962a9e1781c917dbe7f016ab9430e4bd81ba7daf422e58d86a3595"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-eventstream",
+ "aws-smithy-http 0.61.1",
+ "aws-smithy-json",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
  "http 0.2.12",
  "once_cell",
  "regex-lite",
@@ -841,6 +865,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9bfe75fad52793ce6dec0dc3d4b1f388f038b5eb866c8d4d7f3a8e21b5ea5051"
 dependencies = [
  "aws-credential-types",
+ "aws-smithy-eventstream",
  "aws-smithy-http 0.60.12",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
@@ -1240,7 +1265,7 @@ dependencies = [
  "rustc-hash 1.1.0",
  "shlex",
  "syn 2.0.99",
- "which",
+ "which 4.4.2",
 ]
 
 [[package]]
@@ -3386,7 +3411,7 @@ dependencies = [
 
 [[package]]
 name = "goose"
-version = "1.0.24"
+version = "1.0.29"
 dependencies = [
  "anyhow",
  "arrow",
@@ -3394,6 +3419,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-bedrockruntime",
+ "aws-sdk-sagemakerruntime",
  "aws-smithy-types",
  "axum",
  "base64 0.21.7",
@@ -3440,14 +3466,14 @@ dependencies = [
  "url",
  "utoipa",
  "uuid",
- "webbrowser",
+ "webbrowser 0.8.15",
  "winapi",
  "wiremock",
 ]
 
 [[package]]
 name = "goose-bench"
-version = "1.0.24"
+version = "1.0.29"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3471,12 +3497,14 @@ dependencies = [
 
 [[package]]
 name = "goose-cli"
-version = "1.0.24"
+version = "1.0.29"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "bat",
+ "bytes",
  "chrono",
  "clap 4.5.31",
  "cliclack",
@@ -3486,6 +3514,7 @@ dependencies = [
  "goose",
  "goose-bench",
  "goose-mcp",
+ "http 1.2.0",
  "indicatif",
  "mcp-client",
  "mcp-core",
@@ -3506,15 +3535,19 @@ dependencies = [
  "tempfile",
  "test-case",
  "tokio",
+ "tokio-stream",
+ "tower-http",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "urlencoding",
+ "webbrowser 1.0.4",
  "winapi",
 ]
 
 [[package]]
 name = "goose-ffi"
-version = "1.0.24"
+version = "1.0.29"
 dependencies = [
  "cbindgen",
  "futures",
@@ -3528,7 +3561,7 @@ dependencies = [
 
 [[package]]
 name = "goose-llm"
-version = "1.0.24"
+version = "1.0.29"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3557,7 +3590,7 @@ dependencies = [
 
 [[package]]
 name = "goose-mcp"
-version = "1.0.24"
+version = "1.0.29"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3601,13 +3634,14 @@ dependencies = [
  "url",
  "urlencoding",
  "utoipa",
- "webbrowser",
+ "webbrowser 0.8.15",
+ "which 6.0.3",
  "xcap",
 ]
 
 [[package]]
 name = "goose-server"
-version = "1.0.24"
+version = "1.0.29"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3875,6 +3909,12 @@ dependencies = [
  "http-body 1.0.1",
  "pin-project-lite",
 ]
+
+[[package]]
+name = "http-range-header"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
 
 [[package]]
 name = "httparse"
@@ -5414,10 +5454,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "memo-map"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
+name = "mime_guess"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
+dependencies = [
+ "mime",
+ "unicase",
+]
 
 [[package]]
 name = "minijinja"
@@ -5425,6 +5481,8 @@ version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e36f1329330bb1614c94b78632b9ce45dd7d761f3304a1bed07b2990a7c5097"
 dependencies = [
+ "memo-map",
+ "self_cell",
  "serde",
 ]
 
@@ -5811,6 +5869,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "915b1b472bc21c53464d6c8461c9d3af805ba1ef837e1cac254428f4a77177b1"
 dependencies = [
  "malloc_buf",
+]
+
+[[package]]
+name = "objc2"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88c6597e14493ab2e44ce58f2fdecf095a51f12ca57bec060a11c57332520551"
+dependencies = [
+ "objc2-encode",
+]
+
+[[package]]
+name = "objc2-encode"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef25abbcd74fb2609453eb695bd2f860d389e457f67dc17cafc8b8cbc89d0c33"
+
+[[package]]
+name = "objc2-foundation"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "900831247d2fe1a09a683278e5384cfb8c80c79fe6b166f9d14bfdde0ea1b03c"
+dependencies = [
+ "bitflags 2.9.0",
+ "objc2",
 ]
 
 [[package]]
@@ -7372,6 +7455,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "self_cell"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f7d95a54511e0c7be3f51e8867aa8cf35148d7b9445d44de2f943e2b206e749"
+
+[[package]]
 name = "semver"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8591,12 +8680,21 @@ checksum = "1e9cd434a998747dd2c4276bc96ee2e0c7a2eadf3cae88e52be55a05fa9053f5"
 dependencies = [
  "bitflags 2.9.0",
  "bytes",
+ "futures-util",
  "http 1.2.0",
  "http-body 1.0.1",
  "http-body-util",
+ "http-range-header",
+ "httpdate",
+ "mime",
+ "mime_guess",
+ "percent-encoding",
  "pin-project-lite",
+ "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -9250,6 +9348,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "webbrowser"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5df295f8451142f1856b1bd86a606dfe9587d439bc036e319c827700dbd555e"
+dependencies = [
+ "core-foundation 0.10.0",
+ "home",
+ "jni",
+ "log",
+ "ndk-context",
+ "objc2",
+ "objc2-foundation",
+ "url",
+ "web-sys",
+]
+
+[[package]]
 name = "webpki-roots"
 version = "0.26.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9283,6 +9398,18 @@ dependencies = [
  "home",
  "once_cell",
  "rustix 0.38.44",
+]
+
+[[package]]
+name = "which"
+version = "6.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ee928febd44d98f2f459a4a79bd4d928591333a494a10a868418ac1b39cf1f"
+dependencies = [
+ "either",
+ "home",
+ "rustix 0.38.44",
+ "winsafe",
 ]
 
 [[package]]
@@ -9704,6 +9831,12 @@ dependencies = [
  "cfg-if",
  "windows-sys 0.48.0",
 ]
+
+[[package]]
+name = "winsafe"
+version = "0.0.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 
 [[package]]
 name = "wiremock"

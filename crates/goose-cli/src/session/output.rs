@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Error;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 // Re-export theme for use in main
@@ -114,6 +115,14 @@ pub fn show_thinking() {
 
 pub fn hide_thinking() {
     THINKING.with(|t| t.borrow_mut().hide());
+}
+
+pub fn set_thinking_message(s: &String) {
+    THINKING.with(|t| {
+        if let Some(spinner) = t.borrow_mut().spinner.as_mut() {
+            spinner.set_message(s);
+        }
+    });
 }
 
 pub fn render_message(message: &Message, debug: bool) {
@@ -536,7 +545,13 @@ fn shorten_path(path: &str, debug: bool) -> String {
 }
 
 // Session display functions
-pub fn display_session_info(resume: bool, provider: &str, model: &str, session_file: &Path) {
+pub fn display_session_info(
+    resume: bool,
+    provider: &str,
+    model: &str,
+    session_file: &Path,
+    provider_instance: Option<&Arc<dyn goose::providers::base::Provider>>,
+) {
     let start_session_msg = if resume {
         "resuming session |"
     } else if session_file.to_str() == Some("/dev/null") || session_file.to_str() == Some("NUL") {
@@ -544,14 +559,42 @@ pub fn display_session_info(resume: bool, provider: &str, model: &str, session_f
     } else {
         "starting session |"
     };
-    println!(
-        "{} {} {} {} {}",
-        style(start_session_msg).dim(),
-        style("provider:").dim(),
-        style(provider).cyan().dim(),
-        style("model:").dim(),
-        style(model).cyan().dim(),
-    );
+
+    // Check if we have lead/worker mode
+    if let Some(provider_inst) = provider_instance {
+        if let Some(lead_worker) = provider_inst.as_lead_worker() {
+            let (lead_model, worker_model) = lead_worker.get_model_info();
+            println!(
+                "{} {} {} {} {} {} {}",
+                style(start_session_msg).dim(),
+                style("provider:").dim(),
+                style(provider).cyan().dim(),
+                style("lead model:").dim(),
+                style(&lead_model).cyan().dim(),
+                style("worker model:").dim(),
+                style(&worker_model).cyan().dim(),
+            );
+        } else {
+            println!(
+                "{} {} {} {} {}",
+                style(start_session_msg).dim(),
+                style("provider:").dim(),
+                style(provider).cyan().dim(),
+                style("model:").dim(),
+                style(model).cyan().dim(),
+            );
+        }
+    } else {
+        // Fallback to original behavior if no provider instance
+        println!(
+            "{} {} {} {} {}",
+            style(start_session_msg).dim(),
+            style("provider:").dim(),
+            style(provider).cyan().dim(),
+            style("model:").dim(),
+            style(model).cyan().dim(),
+        );
+    }
 
     if session_file.to_str() != Some("/dev/null") && session_file.to_str() != Some("NUL") {
         println!(
@@ -578,12 +621,19 @@ pub fn display_greeting() {
 pub fn display_context_usage(total_tokens: usize, context_limit: usize) {
     use console::style;
 
-    // Calculate percentage used
-    let percentage = (total_tokens as f64 / context_limit as f64 * 100.0).round() as usize;
+    if context_limit == 0 {
+        println!("Context: Error - context limit is zero");
+        return;
+    }
 
-    // Create dot visualization
+    // Calculate percentage used with bounds checking
+    let percentage =
+        (((total_tokens as f64 / context_limit as f64) * 100.0).round() as usize).min(100);
+
+    // Create dot visualization with safety bounds
     let dot_count = 10;
-    let filled_dots = ((percentage as f64 / 100.0) * dot_count as f64).round() as usize;
+    let filled_dots =
+        (((percentage as f64 / 100.0) * dot_count as f64).round() as usize).min(dot_count);
     let empty_dots = dot_count - filled_dots;
 
     let filled = "●".repeat(filled_dots);
@@ -660,6 +710,12 @@ impl McpSpinners {
     }
 
     pub fn hide(&mut self) -> Result<(), Error> {
+        self.bars.iter_mut().for_each(|(_, bar)| {
+            bar.disable_steady_tick();
+        });
+        if let Some(spinner) = self.log_spinner.as_mut() {
+            spinner.disable_steady_tick();
+        }
         self.multi_bar.clear()
     }
 }

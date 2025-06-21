@@ -16,7 +16,8 @@ use crate::permission::permission_judge::check_tool_permissions;
 use crate::permission::PermissionConfirmation;
 use crate::providers::base::Provider;
 use crate::providers::errors::ProviderError;
-use crate::recipe::{Author, Recipe};
+use crate::recipe::{Author, Recipe, Settings};
+use crate::scheduler_trait::SchedulerTrait;
 use crate::tool_monitor::{ToolCall, ToolMonitor};
 use regex::Regex;
 use serde_json::Value;
@@ -27,13 +28,14 @@ use crate::agents::extension::{ExtensionConfig, ExtensionError, ExtensionResult,
 use crate::agents::extension_manager::{get_parameter_names, ExtensionManager};
 use crate::agents::platform_tools::{
     PLATFORM_LIST_RESOURCES_TOOL_NAME, PLATFORM_MANAGE_EXTENSIONS_TOOL_NAME,
-    PLATFORM_READ_RESOURCE_TOOL_NAME, PLATFORM_SEARCH_AVAILABLE_EXTENSIONS_TOOL_NAME,
+    PLATFORM_MANAGE_SCHEDULE_TOOL_NAME, PLATFORM_READ_RESOURCE_TOOL_NAME,
+    PLATFORM_SEARCH_AVAILABLE_EXTENSIONS_TOOL_NAME,
 };
 use crate::agents::prompt_manager::PromptManager;
 use crate::agents::router_tool_selector::{
     create_tool_selector, RouterToolSelectionStrategy, RouterToolSelector,
 };
-use crate::agents::router_tools::ROUTER_VECTOR_SEARCH_TOOL_NAME;
+use crate::agents::router_tools::{ROUTER_LLM_SEARCH_TOOL_NAME, ROUTER_VECTOR_SEARCH_TOOL_NAME};
 use crate::agents::tool_router_index_manager::ToolRouterIndexManager;
 use crate::agents::tool_vectordb::generate_table_id;
 use crate::agents::types::SessionConfig;
@@ -59,12 +61,14 @@ pub struct Agent {
     pub(super) tool_result_rx: ToolResultReceiver,
     pub(super) tool_monitor: Mutex<Option<ToolMonitor>>,
     pub(super) router_tool_selector: Mutex<Option<Arc<Box<dyn RouterToolSelector>>>>,
+    pub(super) scheduler_service: Mutex<Option<Arc<dyn SchedulerTrait>>>,
 }
 
 #[derive(Clone, Debug)]
 pub enum AgentEvent {
     Message(Message),
     McpNotification((String, JsonRpcMessage)),
+    ModelChange { model: String, mode: String },
 }
 
 impl Agent {
@@ -85,6 +89,7 @@ impl Agent {
             tool_result_rx: Arc::new(Mutex::new(tool_rx)),
             tool_monitor: Mutex::new(None),
             router_tool_selector: Mutex::new(None),
+            scheduler_service: Mutex::new(None),
         }
     }
 
@@ -102,6 +107,12 @@ impl Agent {
         if let Some(monitor) = self.tool_monitor.lock().await.as_mut() {
             monitor.reset();
         }
+    }
+
+    /// Set the scheduler service for this agent
+    pub async fn set_scheduler(&self, scheduler: Arc<dyn SchedulerTrait>) {
+        let mut scheduler_service = self.scheduler_service.lock().await;
+        *scheduler_service = Some(scheduler);
     }
 }
 
@@ -184,7 +195,7 @@ impl Agent {
 
     /// Dispatch a single tool call to the appropriate client
     #[instrument(skip(self, tool_call, request_id), fields(input, output))]
-    pub(super) async fn dispatch_tool_call(
+    pub async fn dispatch_tool_call(
         &self,
         tool_call: mcp_core::tool::ToolCall,
         request_id: String,
@@ -201,6 +212,13 @@ impl Agent {
                     )),
                 );
             }
+        }
+
+        if tool_call.name == PLATFORM_MANAGE_SCHEDULE_TOOL_NAME {
+            let result = self
+                .handle_schedule_management(tool_call.arguments, request_id.clone())
+                .await;
+            return (request_id, Ok(ToolCallResult::from(result)));
         }
 
         if tool_call.name == PLATFORM_MANAGE_EXTENSIONS_TOOL_NAME {
@@ -244,15 +262,33 @@ impl Agent {
             ToolCallResult::from(Err(ToolError::ExecutionError(
                 "Frontend tool execution required".to_string(),
             )))
-        } else if tool_call.name == ROUTER_VECTOR_SEARCH_TOOL_NAME {
+        } else if tool_call.name == ROUTER_VECTOR_SEARCH_TOOL_NAME
+            || tool_call.name == ROUTER_LLM_SEARCH_TOOL_NAME
+        {
             let selector = self.router_tool_selector.lock().await.clone();
-            ToolCallResult::from(if let Some(selector) = selector {
-                selector.select_tools(tool_call.arguments.clone()).await
-            } else {
-                Err(ToolError::ExecutionError(
-                    "Encountered vector search error.".to_string(),
-                ))
-            })
+            let selected_tools = match selector.as_ref() {
+                Some(selector) => match selector.select_tools(tool_call.arguments.clone()).await {
+                    Ok(tools) => tools,
+                    Err(e) => {
+                        return (
+                            request_id,
+                            Err(ToolError::ExecutionError(format!(
+                                "Failed to select tools: {}",
+                                e
+                            ))),
+                        )
+                    }
+                },
+                None => {
+                    return (
+                        request_id,
+                        Err(ToolError::ExecutionError(
+                            "No tool selector available".to_string(),
+                        )),
+                    )
+                }
+            };
+            ToolCallResult::from(Ok(selected_tools))
         } else {
             // Clone the result to ensure no references to extension_manager are returned
             let result = extension_manager
@@ -284,6 +320,31 @@ impl Agent {
         request_id: String,
     ) -> (String, Result<Vec<Content>, ToolError>) {
         let mut extension_manager = self.extension_manager.lock().await;
+
+        let selector = self.router_tool_selector.lock().await.clone();
+        if ToolRouterIndexManager::is_tool_router_enabled(&selector) {
+            if let Some(selector) = selector {
+                let selector_action = if action == "disable" { "remove" } else { "add" };
+                let extension_manager = self.extension_manager.lock().await;
+                let selector = Arc::new(selector);
+                if let Err(e) = ToolRouterIndexManager::update_extension_tools(
+                    &selector,
+                    &extension_manager,
+                    &extension_name,
+                    selector_action,
+                )
+                .await
+                {
+                    return (
+                        request_id,
+                        Err(ToolError::ExecutionError(format!(
+                            "Failed to update vector index: {}",
+                            e
+                        ))),
+                    );
+                }
+            }
+        }
 
         if action == "disable" {
             let result = extension_manager
@@ -332,33 +393,6 @@ impl Agent {
             })
             .map_err(|e| ToolError::ExecutionError(e.to_string()));
 
-        // Update vector index if operation was successful and vector routing is enabled
-        if result.is_ok() {
-            let selector = self.router_tool_selector.lock().await.clone();
-            if ToolRouterIndexManager::vector_tool_router_enabled(&selector) {
-                if let Some(selector) = selector {
-                    let vector_action = if action == "disable" { "remove" } else { "add" };
-                    let extension_manager = self.extension_manager.lock().await;
-                    if let Err(e) = ToolRouterIndexManager::update_extension_tools(
-                        &selector,
-                        &extension_manager,
-                        &extension_name,
-                        vector_action,
-                    )
-                    .await
-                    {
-                        return (
-                            request_id,
-                            Err(ToolError::ExecutionError(format!(
-                                "Failed to update vector index: {}",
-                                e
-                            ))),
-                        );
-                    }
-                }
-            }
-        }
-
         (request_id, result)
     }
 
@@ -394,13 +428,14 @@ impl Agent {
                 let mut extension_manager = self.extension_manager.lock().await;
                 extension_manager.add_extension(extension.clone()).await?;
             }
-        };
+        }
 
         // If vector tool selection is enabled, index the tools
         let selector = self.router_tool_selector.lock().await.clone();
-        if ToolRouterIndexManager::vector_tool_router_enabled(&selector) {
+        if ToolRouterIndexManager::is_tool_router_enabled(&selector) {
             if let Some(selector) = selector {
                 let extension_manager = self.extension_manager.lock().await;
+                let selector = Arc::new(selector);
                 if let Err(e) = ToolRouterIndexManager::update_extension_tools(
                     &selector,
                     &extension_manager,
@@ -432,6 +467,7 @@ impl Agent {
             // Add platform tools
             prefixed_tools.push(platform_tools::search_available_extensions_tool());
             prefixed_tools.push(platform_tools::manage_extensions_tool());
+            prefixed_tools.push(platform_tools::manage_schedule_tool());
 
             // Add resource tools if supported
             if extension_manager.supports_resources() {
@@ -451,6 +487,9 @@ impl Agent {
         match strategy {
             Some(RouterToolSelectionStrategy::Vector) => {
                 prefixed_tools.push(router_tools::vector_search_tool());
+            }
+            Some(RouterToolSelectionStrategy::Llm) => {
+                prefixed_tools.push(router_tools::llm_search_tool());
             }
             None => {}
         }
@@ -479,12 +518,9 @@ impl Agent {
     }
 
     pub async fn remove_extension(&self, name: &str) -> Result<()> {
-        let mut extension_manager = self.extension_manager.lock().await;
-        extension_manager.remove_extension(name).await?;
-
         // If vector tool selection is enabled, remove tools from the index
         let selector = self.router_tool_selector.lock().await.clone();
-        if ToolRouterIndexManager::vector_tool_router_enabled(&selector) {
+        if ToolRouterIndexManager::is_tool_router_enabled(&selector) {
             if let Some(selector) = selector {
                 let extension_manager = self.extension_manager.lock().await;
                 ToolRouterIndexManager::update_extension_tools(
@@ -496,6 +532,9 @@ impl Agent {
                 .await?;
             }
         }
+
+        let mut extension_manager = self.extension_manager.lock().await;
+        extension_manager.remove_extension(name).await?;
 
         Ok(())
     }
@@ -535,7 +574,25 @@ impl Agent {
         let (mut tools, mut toolshim_tools, mut system_prompt) =
             self.prepare_tools_and_prompt().await?;
 
-        let goose_mode = config.get_param("GOOSE_MODE").unwrap_or("auto".to_string());
+        // Get goose_mode from config, but override with execution_mode if provided in session config
+        let mut goose_mode = config.get_param("GOOSE_MODE").unwrap_or("auto".to_string());
+
+        // If this is a scheduled job with an execution_mode, override the goose_mode
+        if let Some(session_config) = &session {
+            if let Some(execution_mode) = &session_config.execution_mode {
+                // Map "foreground" to "auto" and "background" to "chat"
+                goose_mode = match execution_mode.as_str() {
+                    "foreground" => "auto".to_string(),
+                    "background" => "chat".to_string(),
+                    _ => goose_mode,
+                };
+                tracing::info!(
+                    "Using execution_mode '{}' which maps to goose_mode '{}'",
+                    execution_mode,
+                    goose_mode
+                );
+            }
+        }
 
         let (tools_with_readonly_annotation, tools_without_annotation) =
             Self::categorize_tools_by_annotation(&tools);
@@ -559,6 +616,26 @@ impl Agent {
                     &toolshim_tools,
                 ).await {
                     Ok((response, usage)) => {
+                        // Emit model change event if provider is lead-worker
+                        let provider = self.provider().await?;
+                        if let Some(lead_worker) = provider.as_lead_worker() {
+                            // The actual model used is in the usage
+                            let active_model = usage.model.clone();
+                            let (lead_model, worker_model) = lead_worker.get_model_info();
+                            let mode = if active_model == lead_model {
+                                "lead"
+                            } else if active_model == worker_model {
+                                "worker"
+                            } else {
+                                "unknown"
+                            };
+
+                            yield AgentEvent::ModelChange {
+                                model: active_model,
+                                mode: mode.to_string(),
+                            };
+                        }
+
                         // record usage for the session in the session file
                         if let Some(session_config) = session.clone() {
                             Self::update_session_metrics(session_config, &usage, messages.len()).await?;
@@ -777,22 +854,29 @@ impl Agent {
 
         let strategy = match router_tool_selection_strategy.to_lowercase().as_str() {
             "vector" => Some(RouterToolSelectionStrategy::Vector),
+            "llm" => Some(RouterToolSelectionStrategy::Llm),
             _ => None,
         };
 
-        if let Some(strategy) = strategy {
-            let table_name = generate_table_id();
-            let selector = create_tool_selector(Some(strategy), provider, table_name)
-                .await
-                .map_err(|e| anyhow!("Failed to create tool selector: {}", e))?;
-
-            let selector = Arc::new(selector);
-            *self.router_tool_selector.lock().await = Some(selector.clone());
-
-            let extension_manager = self.extension_manager.lock().await;
-            ToolRouterIndexManager::index_platform_tools(&selector, &extension_manager).await?;
-        }
-
+        let selector = match strategy {
+            Some(RouterToolSelectionStrategy::Vector) => {
+                let table_name = generate_table_id();
+                let selector = create_tool_selector(strategy, provider, Some(table_name))
+                    .await
+                    .map_err(|e| anyhow!("Failed to create tool selector: {}", e))?;
+                Arc::new(selector)
+            }
+            Some(RouterToolSelectionStrategy::Llm) => {
+                let selector = create_tool_selector(strategy, provider, None)
+                    .await
+                    .map_err(|e| anyhow!("Failed to create tool selector: {}", e))?;
+                Arc::new(selector)
+            }
+            None => return Ok(()),
+        };
+        let extension_manager = self.extension_manager.lock().await;
+        ToolRouterIndexManager::index_platform_tools(&selector, &extension_manager).await?;
+        *self.router_tool_selector.lock().await = Some(selector.clone());
         Ok(())
     }
 
@@ -973,12 +1057,26 @@ impl Agent {
             metadata: None,
         };
 
+        // Ideally we'd get the name of the provider we are using from the provider itself
+        // but it doesn't know and the plumbing looks complicated.
+        let config = Config::global();
+        let provider_name: String = config
+            .get_param("GOOSE_PROVIDER")
+            .expect("No provider configured. Run 'goose configure' first");
+
+        let settings = Settings {
+            goose_provider: Some(provider_name.clone()),
+            goose_model: Some(model_name.clone()),
+            temperature: Some(model_config.temperature.unwrap_or(0.0)),
+        };
+
         let recipe = Recipe::builder()
             .title("Custom recipe from chat")
             .description("a custom recipe instance from this chat session")
             .instructions(instructions)
             .activities(activities)
             .extensions(extension_configs)
+            .settings(settings)
             .author(author)
             .build()
             .expect("valid recipe");

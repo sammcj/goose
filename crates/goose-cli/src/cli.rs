@@ -11,14 +11,17 @@ use crate::commands::project::{handle_project_default, handle_projects_interacti
 use crate::commands::recipe::{handle_deeplink, handle_validate};
 // Import the new handlers from commands::schedule
 use crate::commands::schedule::{
-    handle_schedule_add, handle_schedule_list, handle_schedule_remove, handle_schedule_run_now,
+    handle_schedule_add, handle_schedule_cron_help, handle_schedule_list, handle_schedule_remove,
+    handle_schedule_run_now, handle_schedule_services_status, handle_schedule_services_stop,
     handle_schedule_sessions,
 };
 use crate::commands::session::{handle_session_list, handle_session_remove};
 use crate::logging::setup_logging;
-use crate::recipes::recipe::{explain_recipe_with_parameters, load_recipe_as_template};
+use crate::recipes::recipe::{
+    explain_recipe_with_parameters, load_recipe_as_template, load_recipe_content_as_template,
+};
 use crate::session;
-use crate::session::{build_session, SessionBuilderConfig};
+use crate::session::{build_session, SessionBuilderConfig, SessionSettings};
 use goose_bench::bench_config::BenchRunConfig;
 use goose_bench::runners::bench_runner::BenchRunner;
 use goose_bench::runners::eval_runner::EvalRunner;
@@ -42,7 +45,8 @@ struct Identifier {
         long,
         value_name = "NAME",
         help = "Name for the chat session (e.g., 'project-x')",
-        long_help = "Specify a name for your chat session. When used with --resume, will resume this specific session if it exists."
+        long_help = "Specify a name for your chat session. When used with --resume, will resume this specific session if it exists.",
+        alias = "id"
     )]
     name: Option<String>,
 
@@ -123,7 +127,11 @@ enum SchedulerCommand {
     Add {
         #[arg(long, help = "Unique ID for the job")]
         id: String,
-        #[arg(long, help = "Cron string for the schedule (e.g., '0 0 * * * *')")]
+        #[arg(
+            long,
+            help = "Cron expression for the schedule",
+            long_help = "Cron expression for when to run the job. Examples:\n  '0 * * * *'     - Every hour at minute 0\n  '0 */2 * * *'   - Every 2 hours\n  '@hourly'       - Every hour (shorthand)\n  '0 9 * * *'     - Every day at 9:00 AM\n  '0 9 * * 1'     - Every Monday at 9:00 AM\n  '0 0 1 * *'     - First day of every month at midnight"
+        )]
         cron: String,
         #[arg(
             long,
@@ -155,6 +163,15 @@ enum SchedulerCommand {
         #[arg(long, help = "ID of the schedule to run")] // Explicitly make it --id
         id: String,
     },
+    /// Check status of Temporal services (temporal scheduler only)
+    #[command(about = "Check status of Temporal services")]
+    ServicesStatus {},
+    /// Stop Temporal services (temporal scheduler only)
+    #[command(about = "Stop Temporal services")]
+    ServicesStop {},
+    /// Show cron expression examples and help
+    #[command(about = "Show cron expression examples and help")]
+    CronHelp {},
 }
 
 #[derive(Subcommand)]
@@ -361,6 +378,16 @@ enum Command {
         )]
         input_text: Option<String>,
 
+        /// Additional system prompt to customize agent behavior
+        #[arg(
+            long = "system",
+            value_name = "TEXT",
+            help = "Additional system prompt to customize agent behavior",
+            long_help = "Provide additional system instructions to customize the agent's behavior",
+            conflicts_with = "recipe"
+        )]
+        system: Option<String>,
+
         /// Recipe name or full path to the recipe file
         #[arg(
             short = None,
@@ -406,6 +433,13 @@ enum Command {
             help = "Show the recipe title, description, and parameters"
         )]
         explain: bool,
+
+        /// Print the rendered recipe instead of running it
+        #[arg(
+            long = "render-recipe",
+            help = "Print the rendered recipe instead of running it."
+        )]
+        render_recipe: bool,
 
         /// Maximum number of consecutive identical tool calls allowed
         #[arg(
@@ -467,6 +501,24 @@ enum Command {
             value_delimiter = ','
         )]
         builtins: Vec<String>,
+
+        /// Quiet mode - suppress non-response output
+        #[arg(
+            short = 'q',
+            long = "quiet",
+            help = "Quiet mode. Suppress non-response output, printing only the model response to stdout"
+        )]
+        quiet: bool,
+
+        /// Scheduled job ID (used internally for scheduled executions)
+        #[arg(
+            long = "scheduled-job-id",
+            value_name = "ID",
+            help = "ID of the scheduled job that triggered this execution (internal use)",
+            long_help = "Internal parameter used when this run command is executed by a scheduled job. This associates the session with the schedule for tracking purposes.",
+            hide = true
+        )]
+        scheduled_job_id: Option<String>,
     },
 
     /// Recipe utilities for validation and deeplinking
@@ -504,6 +556,31 @@ enum Command {
         #[command(subcommand)]
         cmd: BenchCommand,
     },
+
+    /// Start a web server with a chat interface
+    #[command(about = "Start a web server with a chat interface", hide = true)]
+    Web {
+        /// Port to run the web server on
+        #[arg(
+            short,
+            long,
+            default_value = "3000",
+            help = "Port to run the web server on"
+        )]
+        port: u16,
+
+        /// Host to bind the web server to
+        #[arg(
+            long,
+            default_value = "127.0.0.1",
+            help = "Host to bind the web server to"
+        )]
+        host: String,
+
+        /// Open browser automatically
+        #[arg(long, help = "Open browser automatically when server starts")]
+        open: bool,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -513,6 +590,7 @@ enum CliProviderVariant {
     Ollama,
 }
 
+#[derive(Debug)]
 struct InputConfig {
     contents: Option<String>,
     extensions_override: Option<Vec<ExtensionConfig>>,
@@ -591,8 +669,12 @@ pub async fn cli() -> Result<()> {
                         builtins,
                         extensions_override: None,
                         additional_system_prompt: None,
+                        settings: None,
                         debug,
                         max_tool_repetitions,
+                        scheduled_job_id: None,
+                        interactive: true,
+                        quiet: false,
                     })
                     .await;
                     setup_logging(
@@ -620,10 +702,12 @@ pub async fn cli() -> Result<()> {
             handle_projects_interactive()?;
             return Ok(());
         }
+
         Some(Command::Run {
             instructions,
             input_text,
             recipe,
+            system,
             interactive,
             identifier,
             resume,
@@ -635,21 +719,33 @@ pub async fn cli() -> Result<()> {
             builtins,
             params,
             explain,
+            render_recipe,
+            scheduled_job_id,
+            quiet,
         }) => {
-            let input_config = match (instructions, input_text, recipe, explain) {
-                (Some(file), _, _, _) if file == "-" => {
+            let (input_config, session_settings) = match (
+                instructions,
+                input_text,
+                recipe,
+                explain,
+                render_recipe,
+            ) {
+                (Some(file), _, _, _, _) if file == "-" => {
                     let mut input = String::new();
                     std::io::stdin()
                         .read_to_string(&mut input)
                         .expect("Failed to read from stdin");
 
-                    InputConfig {
-                        contents: Some(input),
-                        extensions_override: None,
-                        additional_system_prompt: None,
-                    }
+                    (
+                        InputConfig {
+                            contents: Some(input),
+                            extensions_override: None,
+                            additional_system_prompt: system,
+                        },
+                        None,
+                    )
                 }
-                (Some(file), _, _, _) => {
+                (Some(file), _, _, _, _) => {
                     let contents = std::fs::read_to_string(&file).unwrap_or_else(|err| {
                         eprintln!(
                             "Instruction file not found — did you mean to use goose run --text?\n{}",
@@ -657,20 +753,35 @@ pub async fn cli() -> Result<()> {
                         );
                         std::process::exit(1);
                     });
-                    InputConfig {
-                        contents: Some(contents),
-                        extensions_override: None,
-                        additional_system_prompt: None,
-                    }
+                    (
+                        InputConfig {
+                            contents: Some(contents),
+                            extensions_override: None,
+                            additional_system_prompt: None,
+                        },
+                        None,
+                    )
                 }
-                (_, Some(text), _, _) => InputConfig {
-                    contents: Some(text),
-                    extensions_override: None,
-                    additional_system_prompt: None,
-                },
-                (_, _, Some(recipe_name), explain) => {
+                (_, Some(text), _, _, _) => (
+                    InputConfig {
+                        contents: Some(text),
+                        extensions_override: None,
+                        additional_system_prompt: system,
+                    },
+                    None,
+                ),
+                (_, _, Some(recipe_name), explain, render_recipe) => {
                     if explain {
                         explain_recipe_with_parameters(&recipe_name, params)?;
+                        return Ok(());
+                    }
+                    if render_recipe {
+                        let recipe = load_recipe_content_as_template(&recipe_name, params)
+                            .unwrap_or_else(|err| {
+                                eprintln!("{}: {}", console::style("Error").red().bold(), err);
+                                std::process::exit(1);
+                            });
+                        println!("{}", recipe);
                         return Ok(());
                     }
                     let recipe =
@@ -678,13 +789,20 @@ pub async fn cli() -> Result<()> {
                             eprintln!("{}: {}", console::style("Error").red().bold(), err);
                             std::process::exit(1);
                         });
-                    InputConfig {
-                        contents: recipe.prompt,
-                        extensions_override: recipe.extensions,
-                        additional_system_prompt: recipe.instructions,
-                    }
+                    (
+                        InputConfig {
+                            contents: recipe.prompt,
+                            extensions_override: recipe.extensions,
+                            additional_system_prompt: recipe.instructions,
+                        },
+                        recipe.settings.map(|s| SessionSettings {
+                            goose_provider: s.goose_provider,
+                            goose_model: s.goose_model,
+                            temperature: s.temperature,
+                        }),
+                    )
                 }
-                (None, None, None, _) => {
+                (None, None, None, _, _) => {
                     eprintln!("Error: Must provide either --instructions (-i), --text (-t), or --recipe. Use -i - for stdin.");
                     std::process::exit(1);
                 }
@@ -699,8 +817,12 @@ pub async fn cli() -> Result<()> {
                 builtins,
                 extensions_override: input_config.extensions_override,
                 additional_system_prompt: input_config.additional_system_prompt,
+                settings: session_settings,
                 debug,
                 max_tool_repetitions,
+                scheduled_job_id,
+                interactive, // Use the interactive flag from the Run command
+                quiet,
             })
             .await;
 
@@ -742,6 +864,15 @@ pub async fn cli() -> Result<()> {
                 SchedulerCommand::RunNow { id } => {
                     // New arm
                     handle_schedule_run_now(id).await?;
+                }
+                SchedulerCommand::ServicesStatus {} => {
+                    handle_schedule_services_status().await?;
+                }
+                SchedulerCommand::ServicesStop {} => {
+                    handle_schedule_services_stop().await?;
+                }
+                SchedulerCommand::CronHelp {} => {
+                    handle_schedule_cron_help().await?;
                 }
             }
             return Ok(());
@@ -785,6 +916,10 @@ pub async fn cli() -> Result<()> {
             }
             return Ok(());
         }
+        Some(Command::Web { port, host, open }) => {
+            crate::commands::web::handle_web(port, host, open).await?;
+            return Ok(());
+        }
         None => {
             return if !Config::global().exists() {
                 let _ = handle_configure().await;
@@ -800,8 +935,12 @@ pub async fn cli() -> Result<()> {
                     builtins: Vec::new(),
                     extensions_override: None,
                     additional_system_prompt: None,
+                    settings: None::<SessionSettings>,
                     debug: false,
                     max_tool_repetitions: None,
+                    scheduled_job_id: None,
+                    interactive: true, // Default case is always interactive
+                    quiet: false,
                 })
                 .await;
                 setup_logging(

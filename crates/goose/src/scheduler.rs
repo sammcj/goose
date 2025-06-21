@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use etcetera::{choose_app_strategy, AppStrategy};
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,7 @@ use crate::message::Message;
 use crate::providers::base::Provider as GooseProvider; // Alias to avoid conflict in test section
 use crate::providers::create;
 use crate::recipe::Recipe;
+use crate::scheduler_trait::SchedulerTrait;
 use crate::session;
 use crate::session::storage::SessionMetadata;
 
@@ -120,6 +122,8 @@ pub struct ScheduledJob {
     pub current_session_id: Option<String>,
     #[serde(default)]
     pub process_start_time: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub execution_mode: Option<String>, // "foreground" or "background"
 }
 
 async fn persist_jobs_from_arc(
@@ -1057,6 +1061,10 @@ async fn run_scheduled_job_internal(
     }
     tracing::info!("Agent configured with provider for job '{}'", job.id);
 
+    // Log the execution mode
+    let execution_mode = job.execution_mode.as_deref().unwrap_or("background");
+    tracing::info!("Job '{}' running in {} mode", job.id, execution_mode);
+
     let session_id_for_return = session::generate_session_id();
 
     // Update the job with the session ID if we have access to the jobs arc
@@ -1089,6 +1097,7 @@ async fn run_scheduled_job_internal(
             id: crate::session::storage::Identifier::Name(session_id_for_return.clone()),
             working_dir: current_dir.clone(),
             schedule_id: Some(job.id.clone()),
+            execution_mode: job.execution_mode.clone(),
         };
 
         match agent
@@ -1111,6 +1120,9 @@ async fn run_scheduled_job_internal(
                         }
                         Ok(AgentEvent::McpNotification(_)) => {
                             // Handle notifications if needed
+                        }
+                        Ok(AgentEvent::ModelChange { .. }) => {
+                            // Model change events are informational, just continue
                         }
                         Err(e) => {
                             tracing::error!(
@@ -1298,6 +1310,7 @@ mod tests {
             activities: None,
             author: None,
             parameters: None,
+            settings: None,
         };
         let mut recipe_file = File::create(&recipe_filename)?;
         writeln!(
@@ -1317,6 +1330,7 @@ mod tests {
             paused: false,
             current_session_id: None,
             process_start_time: None,
+            execution_mode: Some("background".to_string()), // Default for test
         };
 
         // Create the mock provider instance for the test
@@ -1369,5 +1383,59 @@ mod tests {
         env::remove_var("GOOSE_MODEL");
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl SchedulerTrait for Scheduler {
+    async fn add_scheduled_job(&self, job: ScheduledJob) -> Result<(), SchedulerError> {
+        self.add_scheduled_job(job).await
+    }
+
+    async fn list_scheduled_jobs(&self) -> Result<Vec<ScheduledJob>, SchedulerError> {
+        Ok(self.list_scheduled_jobs().await)
+    }
+
+    async fn remove_scheduled_job(&self, id: &str) -> Result<(), SchedulerError> {
+        self.remove_scheduled_job(id).await
+    }
+
+    async fn pause_schedule(&self, id: &str) -> Result<(), SchedulerError> {
+        self.pause_schedule(id).await
+    }
+
+    async fn unpause_schedule(&self, id: &str) -> Result<(), SchedulerError> {
+        self.unpause_schedule(id).await
+    }
+
+    async fn run_now(&self, id: &str) -> Result<String, SchedulerError> {
+        self.run_now(id).await
+    }
+
+    async fn sessions(
+        &self,
+        sched_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, SessionMetadata)>, SchedulerError> {
+        self.sessions(sched_id, limit).await
+    }
+
+    async fn update_schedule(
+        &self,
+        sched_id: &str,
+        new_cron: String,
+    ) -> Result<(), SchedulerError> {
+        self.update_schedule(sched_id, new_cron).await
+    }
+
+    async fn kill_running_job(&self, sched_id: &str) -> Result<(), SchedulerError> {
+        self.kill_running_job(sched_id).await
+    }
+
+    async fn get_running_job_info(
+        &self,
+        sched_id: &str,
+    ) -> Result<Option<(String, DateTime<Utc>)>, SchedulerError> {
+        self.get_running_job_info(sched_id).await
     }
 }

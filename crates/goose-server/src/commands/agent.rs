@@ -6,7 +6,7 @@ use anyhow::Result;
 use etcetera::{choose_app_strategy, AppStrategy};
 use goose::agents::Agent;
 use goose::config::APP_STRATEGY;
-use goose::scheduler::Scheduler as GooseScheduler;
+use goose::scheduler_factory::SchedulerFactory;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
@@ -28,8 +28,11 @@ pub async fn run() -> Result<()> {
         .data_dir()
         .join("schedules.json");
 
-    let scheduler_instance = GooseScheduler::new(schedule_file_path).await?;
-    app_state.set_scheduler(scheduler_instance).await;
+    let scheduler_instance = SchedulerFactory::create(schedule_file_path).await?;
+    app_state.set_scheduler(scheduler_instance.clone()).await;
+
+    // NEW: Provide scheduler access to the agent
+    agent_ref.set_scheduler(scheduler_instance).await;
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

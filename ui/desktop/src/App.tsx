@@ -20,6 +20,7 @@ import SharedSessionView from './components/sessions/SharedSessionView';
 import SchedulesView from './components/schedule/SchedulesView';
 import ProviderSettings from './components/settings/providers/ProviderSettingsPage';
 import RecipeEditor from './components/RecipeEditor';
+import RecipesView from './components/RecipesView';
 import { useChat } from './hooks/useChat';
 
 import 'react-toastify/dist/ReactToastify.css';
@@ -45,6 +46,7 @@ export type View =
   | 'sharedSession'
   | 'loading'
   | 'recipeEditor'
+  | 'recipes'
   | 'permission';
 
 export type ViewOptions = {
@@ -105,7 +107,6 @@ const getInitialView = (): ViewConfig => {
 export default function App() {
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
-  const [appInitialized, setAppInitialized] = useState(false);
   const [pendingLink, setPendingLink] = useState<string | null>(null);
   const [modalMessage, setModalMessage] = useState<string>('');
   const [extensionConfirmLabel, setExtensionConfirmLabel] = useState<string>('');
@@ -207,15 +208,10 @@ export default function App() {
       toastService.configure({ silent: false });
     };
 
-    (async () => {
-      try {
-        await initializeApp();
-        setAppInitialized(true);
-      } catch (error) {
-        console.error('Unhandled error in initialization:', error);
-        setFatalError(`${error instanceof Error ? error.message : 'Unknown error'}`);
-      }
-    })();
+    initializeApp().catch((error) => {
+      console.error('Unhandled error in initialization:', error);
+      setFatalError(`${error instanceof Error ? error.message : 'Unknown error'}`);
+    });
   }, [read, getExtensions, addExtension]);
 
   const [isGoosehintsModalOpen, setIsGoosehintsModalOpen] = useState(false);
@@ -302,8 +298,16 @@ export default function App() {
     console.log('Setting up view change handler');
     const handleSetView = (_event: IpcRendererEvent, ...args: unknown[]) => {
       const newView = args[0] as View;
-      console.log(`Received view change request to: ${newView}`);
-      setView(newView);
+      const section = args[1] as string | undefined;
+      console.log(
+        `Received view change request to: ${newView}${section ? `, section: ${section}` : ''}`
+      );
+
+      if (section && newView === 'settings') {
+        setView(newView, { section });
+      } else {
+        setView(newView);
+      }
     };
     const urlParams = new URLSearchParams(window.location.search);
     const viewFromUrl = urlParams.get('view');
@@ -507,7 +511,6 @@ export default function App() {
           )}
           {view === 'chat' && !isLoadingSession && (
             <ChatView
-              readyForAutoUserPrompt={appInitialized}
               chat={chat}
               setChat={setChat}
               setView={setView}
@@ -549,6 +552,7 @@ export default function App() {
               config={(viewOptions?.config as Recipe) || window.electron.getConfig().recipeConfig}
             />
           )}
+          {view === 'recipes' && <RecipesView onBack={() => setView('chat')} />}
           {view === 'permission' && (
             <PermissionSettingsView
               onClose={() => setView((viewOptions as { parentView: View }).parentView)}

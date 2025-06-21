@@ -40,6 +40,7 @@ struct ChatRequest {
     messages: Vec<Message>,
     session_id: Option<String>,
     session_working_dir: String,
+    scheduled_job_id: Option<String>,
 }
 
 pub struct SseResponse {
@@ -87,6 +88,10 @@ enum MessageEvent {
     },
     Finish {
         reason: String,
+    },
+    ModelChange {
+        model: String,
+        mode: String,
     },
     Notification {
         request_id: String,
@@ -177,7 +182,8 @@ async fn handler(
                 Some(SessionConfig {
                     id: session::Identifier::Name(session_id.clone()),
                     working_dir: PathBuf::from(session_working_dir),
-                    schedule_id: None,
+                    schedule_id: request.scheduled_job_id.clone(),
+                    execution_mode: None,
                 }),
             )
             .await
@@ -232,6 +238,17 @@ async fn handler(
                                     tracing::error!("Failed to store session history: {:?}", e);
                                 }
                             });
+                        }
+                        Ok(Some(Ok(AgentEvent::ModelChange { model, mode }))) => {
+                            if let Err(e) = stream_event(MessageEvent::ModelChange { model, mode }, &tx).await {
+                                tracing::error!("Error sending model change through channel: {}", e);
+                                let _ = stream_event(
+                                    MessageEvent::Error {
+                                        error: e.to_string(),
+                                    },
+                                    &tx,
+                                ).await;
+                            }
                         }
                         Ok(Some(Ok(AgentEvent::McpNotification((request_id, n))))) => {
                             if let Err(e) = stream_event(MessageEvent::Notification{
@@ -288,6 +305,7 @@ struct AskRequest {
     prompt: String,
     session_id: Option<String>,
     session_working_dir: String,
+    scheduled_job_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -324,7 +342,8 @@ async fn ask_handler(
             Some(SessionConfig {
                 id: session::Identifier::Name(session_id.clone()),
                 working_dir: PathBuf::from(session_working_dir),
-                schedule_id: None,
+                schedule_id: request.scheduled_job_id.clone(),
+                execution_mode: None,
             }),
         )
         .await
@@ -351,6 +370,10 @@ async fn ask_handler(
                         response_message.content.push(content.clone());
                     }
                 }
+            }
+            Ok(AgentEvent::ModelChange { model, mode }) => {
+                // Log model change for non-streaming
+                tracing::info!("Model changed to {} in {} mode", model, mode);
             }
             Ok(AgentEvent::McpNotification(n)) => {
                 // Handle notifications if needed
@@ -541,9 +564,10 @@ mod tests {
             let state = AppState::new(Arc::new(agent), "test-secret".to_string()).await;
             let scheduler_path = goose::scheduler::get_default_scheduler_storage_path()
                 .expect("Failed to get default scheduler storage path");
-            let scheduler = goose::scheduler::Scheduler::new(scheduler_path)
-                .await
-                .unwrap();
+            let scheduler =
+                goose::scheduler_factory::SchedulerFactory::create_legacy(scheduler_path)
+                    .await
+                    .unwrap();
             state.set_scheduler(scheduler).await;
 
             let app = routes(state);
@@ -558,6 +582,7 @@ mod tests {
                         prompt: "test prompt".to_string(),
                         session_id: Some("test-session".to_string()),
                         session_working_dir: "test-working-dir".to_string(),
+                        scheduled_job_id: None,
                     })
                     .unwrap(),
                 ))

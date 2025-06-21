@@ -19,7 +19,7 @@ pub const SNOWFLAKE_DEFAULT_MODEL: &str = "claude-3-7-sonnet";
 pub const SNOWFLAKE_KNOWN_MODELS: &[&str] = &["claude-3-7-sonnet", "claude-3-5-sonnet"];
 
 pub const SNOWFLAKE_DOC_URL: &str =
-    "https://docs.snowflake.com/en/user-guide/snowflake-cortex/llm-functions#choosing-a-model";
+    "https://docs.snowflake.com/user-guide/snowflake-cortex/aisql#choosing-a-model";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SnowflakeAuth {
@@ -334,7 +334,10 @@ impl SnowflakeProvider {
                     "token count",
                     "exceeds",
                     "exceed context limit",
+                    "input length",
                     "max_tokens",
+                    "decrease input length",
+                    "context limit",
                 ];
                 if check_phrases.iter().any(|c| payload_str.contains(c)) {
                     return Err(ProviderError::ContextLengthExceeded("Request exceeds maximum context length. Please reduce the number of messages or content size.".to_string()));
@@ -396,7 +399,7 @@ impl Provider for SnowflakeProvider {
         ProviderMetadata::new(
             "snowflake",
             "Snowflake",
-            "Access several models using Snowflake Cortex services.",
+            "Access the latest models using Snowflake Cortex services.",
             SNOWFLAKE_DEFAULT_MODEL,
             SNOWFLAKE_KNOWN_MODELS.to_vec(),
             SNOWFLAKE_DOC_URL,
