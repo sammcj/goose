@@ -405,8 +405,7 @@ pub async fn fetch_custom_provider_models(
     use goose::providers::openai::OpenAiProvider;
     use reqwest::Url;
 
-    let url = Url::parse(&request.api_url)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let url = Url::parse(&request.api_url).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let host = if let Some(port) = url.port() {
         format!(
@@ -424,15 +423,15 @@ pub async fn fetch_custom_provider_models(
     };
 
     let base_path = url.path().trim_start_matches('/').to_string();
-    let api_key = request.api_key.unwrap_or_else(|| "not-required".to_string());
+    let api_key = request
+        .api_key
+        .unwrap_or_else(|| "not-required".to_string());
 
     let base_url = if base_path.is_empty() {
         host.clone()
     } else {
         let url_with_path = format!("{}/{}", host, base_path);
-        if request.engine == "openai_compatible" && base_path == "v1" {
-            format!("{}/chat/completions", url_with_path)
-        } else if request.engine == "openai_compatible" && !base_path.contains("chat/completions") {
+        if request.engine == "openai_compatible" && !base_path.contains("chat/completions") {
             format!("{}/chat/completions", url_with_path)
         } else {
             url_with_path
@@ -459,11 +458,11 @@ pub async fn fetch_custom_provider_models(
 
     // Temporarily set the API key in config
     let config = Config::global();
-    config.set_secret("TEMP_API_KEY", &api_key)
+    config
+        .set_secret("TEMP_API_KEY", &api_key)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let model_config = ModelConfig::new("temp")
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let model_config = ModelConfig::new("temp").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let result = match temp_config.engine {
         ProviderEngine::OpenAI => {
             let provider = OpenAiProvider::from_custom_config(model_config, temp_config)
@@ -871,7 +870,10 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/config/extensions", post(add_extension))
         .route("/config/extensions/{name}", delete(remove_extension))
         .route("/config/providers", get(providers))
-        .route("/config/providers/fetch-models", post(fetch_custom_provider_models))
+        .route(
+            "/config/providers/fetch-models",
+            post(fetch_custom_provider_models),
+        )
         .route("/config/providers/{name}/models", get(get_provider_models))
         .route("/config/pricing", post(get_pricing))
         .route("/config/init", post(init_config))

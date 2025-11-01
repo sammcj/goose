@@ -1792,9 +1792,20 @@ async fn try_fetch_custom_provider_models(
 
     let url = url::Url::parse(api_url)?;
     let host = if let Some(port) = url.port() {
-        format!("{}://{}:{}", url.scheme(), url.host_str().ok_or_else(|| anyhow::anyhow!("Invalid URL"))?, port)
+        format!(
+            "{}://{}:{}",
+            url.scheme(),
+            url.host_str()
+                .ok_or_else(|| anyhow::anyhow!("Invalid URL"))?,
+            port
+        )
     } else {
-        format!("{}://{}", url.scheme(), url.host_str().ok_or_else(|| anyhow::anyhow!("Invalid URL"))?)
+        format!(
+            "{}://{}",
+            url.scheme(),
+            url.host_str()
+                .ok_or_else(|| anyhow::anyhow!("Invalid URL"))?
+        )
     };
     let base_path = url.path().trim_start_matches('/').to_string();
 
@@ -1845,6 +1856,117 @@ async fn try_fetch_custom_provider_models(
     }
 }
 
+fn fetch_models_with_retry(
+    provider_type: &str,
+    api_url: &str,
+) -> anyhow::Result<(Option<Vec<String>>, String)> {
+    let spin = spinner();
+    spin.start("Attempting to fetch available models...");
+
+    let mut models: Option<Vec<String>> = None;
+    let mut api_key = String::new();
+
+    match tokio::runtime::Runtime::new().unwrap().block_on(
+        try_fetch_custom_provider_models(provider_type, api_url, None),
+    ) {
+        Ok(fetched_models) => {
+            spin.stop(style("Models fetched successfully").green());
+            models = Some(fetched_models);
+        }
+        Err(e) => {
+            spin.stop(style(format!("Could not fetch models: {}", e)).yellow());
+            let _ = cliclack::log::info("You may need to provide an API key to fetch models");
+
+            let should_retry =
+                cliclack::confirm("Would you like to provide an API key and try again?")
+                    .initial_value(true)
+                    .interact()?;
+
+            if should_retry {
+                api_key = cliclack::password("API key:").mask('▪').interact()?;
+
+                let spin = spinner();
+                spin.start("Retrying with API key...");
+
+                match tokio::runtime::Runtime::new().unwrap().block_on(
+                    try_fetch_custom_provider_models(provider_type, api_url, Some(&api_key)),
+                ) {
+                    Ok(fetched_models) => {
+                        spin.stop(style("Models fetched successfully").green());
+                        models = Some(fetched_models);
+                    }
+                    Err(e) => {
+                        spin.stop(
+                            style(format!("Still could not fetch models: {}", e)).yellow(),
+                        );
+                        let _ = cliclack::log::warning("You will need to enter models manually");
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((models, api_key))
+}
+
+fn select_models_interactive(fetched_models: Option<Vec<String>>) -> anyhow::Result<Vec<String>> {
+    if let Some(fetched_models) = fetched_models {
+        let mut items = vec![(
+            "__manual__".to_string(),
+            "Enter models manually...".to_string(),
+            "Manually specify model names",
+        )];
+        for model in &fetched_models {
+            items.push((model.clone(), model.clone(), ""));
+        }
+
+        let selection = cliclack::select("Select a model or enter manually:")
+            .items(
+                &items
+                    .iter()
+                    .map(|(k, v, d)| (k.as_str(), v.as_str(), *d))
+                    .collect::<Vec<_>>(),
+            )
+            .interact()?;
+
+        if selection == "__manual__" {
+            let models_input: String = cliclack::input("Available models (separate with commas):")
+                .placeholder("model-a, model-b, model-c")
+                .validate(|input: &String| {
+                    if input.trim().is_empty() {
+                        Err("Please enter at least one model name")
+                    } else {
+                        Ok(())
+                    }
+                })
+                .interact()?;
+            Ok(models_input
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect())
+        } else {
+            Ok(vec![selection.to_string()])
+        }
+    } else {
+        let models_input: String = cliclack::input("Available models (separate with commas):")
+            .placeholder("model-a, model-b, model-c")
+            .validate(|input: &String| {
+                if input.trim().is_empty() {
+                    Err("Please enter at least one model name")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact()?;
+        Ok(models_input
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect())
+    }
+}
+
 fn add_provider() -> anyhow::Result<()> {
     let provider_type = cliclack::select("What type of API is this?")
         .item(
@@ -1886,98 +2008,16 @@ fn add_provider() -> anyhow::Result<()> {
         })
         .interact()?;
 
-    // Try to fetch models without API key first
-    let spin = spinner();
-    spin.start("Attempting to fetch available models...");
+    let (fetched_models, mut api_key) = fetch_models_with_retry(provider_type, &api_url)?;
 
-    let mut models: Option<Vec<String>> = None;
-    let mut api_key = String::new();
-
-    match tokio::runtime::Runtime::new().unwrap().block_on(try_fetch_custom_provider_models(provider_type, &api_url, None)) {
-        Ok(fetched_models) => {
-            spin.stop(style("Models fetched successfully").green());
-            models = Some(fetched_models);
-        }
-        Err(e) => {
-            spin.stop(style(format!("Could not fetch models: {}", e)).yellow());
-            let _ = cliclack::log::info("You may need to provide an API key to fetch models");
-
-            let should_retry = cliclack::confirm("Would you like to provide an API key and try again?")
-                .initial_value(true)
-                .interact()?;
-
-            if should_retry {
-                api_key = cliclack::password("API key:")
-                    .mask('▪')
-                    .interact()?;
-
-                let spin = spinner();
-                spin.start("Retrying with API key...");
-
-                match tokio::runtime::Runtime::new().unwrap().block_on(try_fetch_custom_provider_models(provider_type, &api_url, Some(&api_key))) {
-                    Ok(fetched_models) => {
-                        spin.stop(style("Models fetched successfully").green());
-                        models = Some(fetched_models);
-                    }
-                    Err(e) => {
-                        spin.stop(style(format!("Still could not fetch models: {}", e)).yellow());
-                        let _ = cliclack::log::warning("You will need to enter models manually");
-                    }
-                }
-            }
-        }
-    }
-
-    // If we didn't get an API key yet and models were fetched, ask for it now
-    if api_key.is_empty() && models.is_some() {
+    if api_key.is_empty() && fetched_models.is_some() {
         api_key = cliclack::password("API key (optional, press Enter to skip):")
             .allow_empty()
             .mask('▪')
             .interact()?;
     }
 
-    let models: Vec<String> = if let Some(fetched_models) = models {
-        // We have models - let user select or enter manually
-        let mut items = vec![
-            ("__manual__".to_string(), "Enter models manually...".to_string(), "Manually specify model names"),
-        ];
-        for model in &fetched_models {
-            items.push((model.clone(), model.clone(), ""));
-        }
-
-        let selection = cliclack::select("Select a model or enter manually:")
-            .items(&items.iter().map(|(k, v, d)| (k.as_str(), v.as_str(), *d)).collect::<Vec<_>>())
-            .interact()?;
-
-        if selection == "__manual__" {
-            let models_input: String = cliclack::input("Available models (separate with commas):")
-                .placeholder("model-a, model-b, model-c")
-                .validate(|input: &String| {
-                    if input.trim().is_empty() {
-                        Err("Please enter at least one model name")
-                    } else {
-                        Ok(())
-                    }
-                })
-                .interact()?;
-            models_input.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
-        } else {
-            vec![selection.to_string()]
-        }
-    } else {
-        // Manual entry
-        let models_input: String = cliclack::input("Available models (separate with commas):")
-            .placeholder("model-a, model-b, model-c")
-            .validate(|input: &String| {
-                if input.trim().is_empty() {
-                    Err("Please enter at least one model name")
-                } else {
-                    Ok(())
-                }
-            })
-            .interact()?;
-        models_input.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
-    };
+    let models = select_models_interactive(fetched_models)?;
 
     let supports_streaming = cliclack::confirm("Does this provider support streaming responses?")
         .initial_value(true)
